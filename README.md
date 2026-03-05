@@ -1,126 +1,79 @@
-//══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// Entra ID / OAuth2 Authorization Code Interception Detection
-//══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// Version: 1.0
-// Author: Cybersecurity Operations
-// Last Updated: 2026-03-05
-//
-// DESCRIPTION:
-//   Detects potential OAuth2 "Authorization Code Interception" or "PKCE Bypass" attempts by monitoring 
-//   process execution command lines for specific authentication patterns. This query identifies 
-//   processes launched with "prompt=none" parameters—often used in silent token acquisition—and 
-//   extracts the primary host and redirect URIs to identify anomalous or non-corporate domains 
-//   facilitating token theft.
-//
-// VULNERABILITY DETAILS:
-//   CVE: N/A (General Use-Case / Tactic)
-//   Type: Token Theft / Adversary-in-the-Middle (AiTM)
-//   Status: ACTIVE EXPLOITATION OBSERVED
-//   Mechanism: Attackers use illicit consent grants or malicious apps to intercept authorization 
-//              codes. By forcing "prompt=none", they attempt to refresh or gain tokens silently.
-//
-// EXPLOITATION REQUIREMENTS:
-//   - Local or Remote execution context to trigger browser/process events.
-//   - Victim must have an active session with the Identity Provider (IdP).
-//   - Malicious Redirect URI configured in a compromised or attacker-controlled app.
-//
-// USE CASES:
-//   - Detect "Illicit Consent Grant" follow-on activity.
-//   - Identify unauthorized applications requesting silent tokens.
-//   - Track compromised accounts used in automated OAuth2 workflows.
-//   - Correlate suspicious command-line URLs with known phishing infrastructure.
-//
-// MITRE ATT&CK MAPPING:
-//   Technique: T1528 - Steal Application Access Token
-//   Sub-Technique: T1550.001 - Use Alternate Authentication Material: Application Access Token
-//   Tactics: Credential Access, Lateral Movement
-//
-// DATA SOURCE:
-//   Event Type: ProcessRollup2
-//   Required Fields: CommandLine, ComputerName, UserName, @timestamp
-//   Sensor: CrowdStrike Falcon EDR
-//
-// AFFECTED SYSTEMS:
-//   - Windows Workstations (Browser-based SSO environments)
-//   - macOS Endpoints using Enterprise Connect / Jamf Connect
-//   - Linux Servers with CLI-based cloud management tools (Azure CLI, AWS CLI)
-//
-// FALSE POSITIVES:
-//   - Legitimate background update services (e.g., Microsoft Edge/Chrome updates).
-//   - Internal DevOps scripts using Service Principals or Managed Identities.
-//   - Enterprise SSO "keep-alive" mechanisms.
-//   - Known-good Redirect URIs (e.g., localhost for developer tools).
-//
-// INVESTIGATION NOTES:
-//   1. IMMEDIATE: Inspect the 'target_domain'. Is it a known Microsoft, Okta, or internal domain?
-//   2. Review the 'CommandLine' samples. Look for 'client_id' values that don't match authorized apps.
-//   3. Check if the 'UserName' correlates with high-privilege accounts (Global Admin, etc.).
-//   4. Pivot to 'UserLogon' events to see if the activity originated from a suspicious IP address.
-//   5. Verify if the 'ProcessRollup2' parent process is a browser or a standalone executable.
-//
-// TUNING RECOMMENDATIONS:
-//   - Filter out known corporate redirect domains (e.g., company.com, microsoftonline.com).
-//   - Add a whitelist for specific 'client_id' strings known to be used by internal tooling.
-//   - Increase the 'hits' threshold for high-volume service accounts.
-//
-// REMEDIATION:
-//   - Revoke the suspicious OAuth2 Refresh Token/Grant in the Entra ID portal.
-//   - Enable Conditional Access policies requiring MFA for all token requests.
-//   - Reset the password for the affected user and clear active sessions.
-//
-// QUERY LOGIC:
-//   1. Filter for process executions containing 'prompt=none'.
-//   2. Use Regex to strip the primary host from the URL string.
-//   3. Decode and extract nested Redirect URIs to find the final destination of the token.
-//   4. Use 'coalesce' to prioritize the Redirect Host for investigation.
-//   5. Aggregate by user and computer to find clusters of suspicious activity.
-//
-// REFERENCES:
-//   - https://attack.mitre.org/techniques/T1528/
-//   - https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow
-//   - https://www.crowdstrike.com/blog/observations-from-the-front-lines-of-threat-hunting/
-//══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+## 🎯 Overview
 
-// 1. Tag filter first for maximum performance
-#event_simpleName = ProcessRollup2
+This repository serves as a centralized knowledge base for high-fidelity CrowdStrike Query Language (CQL) / LogScale queries. Each markdown file contains:
+* **The Query:** Ready-to-copy LogScale syntax.
+* **Context:** Detailed explanations of the tactics, techniques, and procedures (TTPs) being detected.
+* **MITRE ATT&CK Mappings:** Relevant techniques mapped to the framework.
+* **False Positives & Tuning:** Guidance on filtering out benign enterprise behavior to reduce alert fatigue.
 
-// 2. Filter ONLY for prompt=none so we don't accidentally drop your test events
-| CommandLine = /prompt=none/i 
+---
 
-// 3. Extract the primary domain directly from the command line URL
-| regex("(?i)https?://(?<primary_host>[^/ \"']+)", field=CommandLine, strict=false)
+## 📂 Query Categories
 
-// 4. OPTIONALLY extract the redirect URI if it exists in the string
-| regex("(?i)redirect_uri=(?<redirect_uri>[^& \"]+)", field=CommandLine, strict=false)
-| redirect_uri_decoded := urldecode(redirect_uri)
-| regex("(?i)https?://(?<redirect_host>[^/ \"']+)", field=redirect_uri_decoded, strict=false)
+### 🛡️ Vulnerability & Exploit Detection
+Detect active exploitation and systemic crashes associated with specific CVEs.
+* `CVE-2026-20952`
+* `CVE-2025-62221 - Windows Cloud Filter Driver Crash Detection`
 
-// 5. Combine them: Use the redirect_host if it exists; otherwise, use the primary_host
-| target_domain := coalesce([redirect_host, primary_host])
+### 🕵️ Incident Response & Lateral Movement
+Track anomalous logons, unauthorized remote access, and network tunneling.
+* `IR: Lateral Movement - RDP & Remote Admin Logon Tracking`
+* `Interactive User Logon Tracking`
+* `Privileged Local Logon Monitoring (Workstations)`
+* `RDP Logon Activity Summary`
+* `Remote Port Forwarding via Plink - Unauthorized RDP Tunneling Detection`
+* `Remote Monitoring and Management (RMM) Tool Detection`
 
-// 6. Aggregate results using the unified target_domain
-| groupBy([ComputerName, UserName, target_domain], 
-    function=[
-        count(as=hits), 
-        min(@timestamp, as=first_seen), 
-        max(@timestamp, as=last_seen), 
-        collect(CommandLine, limit=3)
-    ])
-| sort(hits, order=desc)
+### 🥷 Defense Evasion & Obfuscation
+Identify attempts to hide payloads, bypass defenses, or alter secure system states.
+* `Certutil Remote Payload Download Detection`
+* `Non-Browser Processes Using DNS-over-HTTPS`
+* `Plaintext Password Handling - Process Command Line Discovery`
+* `PowerShell Encoded Command Deobfuscation and Analysis`
+* `PowerShell Steganography Detection (Tuoni C2 Framework)`
+* `Pre-Ransomware Inhibiting System Recovery (Shadow Copy Deletion)`
 
-//══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// ENHANCEMENT OPTIONS:
-//
-// Add domain reputation checking (Requires external threat intel integration):
-// | ioc_lookup(target_domain, type=domain)
-// | filter(confidence > 80)
-//
-// Correlate with unexpected parent processes (e.g., cmd.exe spawning a browser with these flags):
-// | join(query={ #event_simpleName=ProcessRollup2 }, field=ParentProcessId, include=[ImageFileName])
-// | filter(ImageFileName != /chrome\.exe|msedge\.exe|firefox\.exe/i)
-//
-// Detect high-frequency polling (potential automated exfiltration):
-// | bucket(@timestamp, span=10m, as=time_bucket)
-// | groupBy([UserName, time_bucket], function=count(as=burst_count))
-// | filter(burst_count > 50)
-//══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+### ☠️ APT & Threat Actor Campaigns
+Specific indicators of compromise (IOCs) and behavioral detections for Advanced Persistent Threats.
+* `Lotus Blossom - Chrysalis APT - Campaign Indicator Detection`
+* `The Chrysalis Backdoor - Lotus Blossom (APT30) Hash Match`
+
+### ☁️ Identity, Cloud & Network
+Detect weak authentication protocols, unauthorized firewall drops, and Entra ID (Azure AD) token theft.
+* `Entra ID / OAuth2 Authorization Code Interception Detection` *(Token Theft / AiTM)*
+* `NTLM Weak Authentication and Key Length Detection`
+* `Cisco FTD - Enhanced External Threat Analysis & Deny Reason Correlation`
+
+---
+
+## 🚀 Usage
+
+1. **Navigate** to the specific `.md` file that matches your hunting objective.
+2. **Review** the header comments in the file for context, prerequisites, and expected false positives.
+3. **Copy** the query block.
+4. **Paste** the query into your CrowdStrike Falcon **Investigate** or **LogScale** search bar.
+5. **Tune** the query as needed for your specific environment (e.g., adding exclusions for known-good management IPs or approved software).
+
+> **Pro Tip:** When running broad timeline queries (like RDP tracking), adjust your timeframe carefully to avoid search timeouts.
+
+---
+
+## 🤝 Contributing
+
+Contributions are heavily encouraged! If you have developed a useful Falcon LogScale query, please consider sharing it with the community.
+
+1. Fork the repository.
+2. Create a new branch (`git checkout -b feature/New-Query-Name`).
+3. Add your query as a `.md` file. **Please use the existing comment headers structure** (Author, Description, MITRE Mapping, False Positives, etc.) for consistency.
+4. Commit your changes (`git commit -m 'Add new query for [Threat]'`).
+5. Push to the branch (`git push origin feature/New-Query-Name`).
+6. Open a Pull Request.
+
+---
+
+## ⚖️ Disclaimer
+
+The queries in this repository are provided "as is" for educational and defensive purposes. They are designed to aid security practitioners in identifying potential threats within their environments. 
+
+* **Test Before Implementing:** Always test and tune queries in a limited scope before converting them into automated scheduled searches or custom IOAs, as aggressive queries can consume significant compute resources or generate excessive false positives.
+* The author(s) are not responsible for any impact on system performance or missed detections.
